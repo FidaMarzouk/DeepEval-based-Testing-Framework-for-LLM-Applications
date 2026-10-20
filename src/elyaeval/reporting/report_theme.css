@@ -1,0 +1,313 @@
+/* =========================================================================
+   elyaeval / reporting  shared report theme
+   Single source of truth for every report renderer (html_report.py's
+   render_html_report() and render_comparison_html()). Imported by reading this file's text 
+   and inlining it into a <style> tag, so every generated report stays a single self-contained
+   HTML file with no external asset/CDN dependency, while every report
+   still shares one visual language.
+   ========================================================================= */
+
+:root {
+  color-scheme: light;
+
+  /* brand accents */
+  --ely-cyan:   #1EB8E8;
+  --ely-pink:   #E6127D;
+  --ely-blue:   #2F6FED;
+  --ely-navy:   #16255C;
+  --ely-black:  #0D0D0F;
+
+  /* tinted backgrounds for the accents above */
+  --ely-cyan-tint: #E6F8FD;
+  --ely-pink-tint: #FCE9F3;
+  --ely-blue-tint: #EAF0FE;
+
+  /* semantic (kept distinct from brand accents  pass/fail must read as
+     green/red regardless of theme, this is a test report first) */
+  --pass:   #1a7f37;
+  --fail:   #cf222e;
+  --pass-tint: #E9F7EF;
+  --fail-tint: #FDEDEE;
+
+  --muted:  #6E7781;
+  --border: #E3E6EA;
+  --bg-alt: #F6F8FA;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  margin: 0;
+  padding: 2.5rem clamp(1.25rem, 4vw, 3rem) 3rem;
+  color: var(--ely-black);
+  background:
+    radial-gradient(var(--border) 1px, transparent 1.5px) 0 0 / 22px 22px,
+    #ffffff;
+  background-attachment: fixed;
+}
+
+.report-shell {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+/* ---- header ------------------------------------------------------- */
+
+.report-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 2rem;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: Georgia, "Times New Roman", serif;
+  font-style: italic;
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--ely-black);
+  white-space: nowrap;
+}
+
+.brand .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ely-pink);
+  flex: none;
+}
+
+.report-titleblock h1 {
+  font-size: clamp(1.35rem, 2.4vw, 1.75rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin: 0.35rem 0 0;
+}
+
+.report-titleblock h1 em {
+  font-style: italic;
+  font-weight: 600;
+  color: var(--ely-blue);
+}
+
+.meta-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.pill strong {
+  color: var(--ely-black);
+  font-weight: 700;
+}
+
+.pill.pill-dark {
+  background: var(--ely-black);
+  border-color: var(--ely-black);
+  color: #fff;
+}
+
+.pill.pill-dark strong { color: #fff; }
+
+/* ---- section labels (small-caps + colored dot, like site's eyebrow) - */
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 2.5rem 0 1rem;
+}
+
+.section-label::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ely-pink);
+  flex: none;
+}
+
+.section-label.cyan::before  { background: var(--ely-cyan); }
+.section-label.blue::before  { background: var(--ely-blue); }
+
+/* ---- KPI cards (styled after the site's case-study stat cards) ----- */
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.kpi-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.1rem 1.3rem 1.3rem;
+  background: #ffffff;
+}
+
+.kpi-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 0.85rem;
+}
+
+.kpi-tag .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+.kpi-card.cyan .kpi-tag { background: var(--ely-cyan-tint); color: #0C7C9B; }
+.kpi-card.cyan .kpi-tag .dot { background: var(--ely-cyan); }
+.kpi-card.pink .kpi-tag { background: var(--ely-pink-tint); color: var(--ely-pink); }
+.kpi-card.pink .kpi-tag .dot { background: var(--ely-pink); }
+.kpi-card.blue .kpi-tag { background: var(--ely-blue-tint); color: var(--ely-blue); }
+.kpi-card.blue .kpi-tag .dot { background: var(--ely-blue); }
+.kpi-card.neutral .kpi-tag { background: var(--bg-alt); color: var(--muted); }
+.kpi-card.neutral .kpi-tag .dot { background: var(--muted); }
+
+.kpi-value {
+  font-size: clamp(1.5rem, 3vw, 1.9rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  margin-bottom: 0.4rem;
+}
+
+.kpi-card.cyan .kpi-value { color: #0C7C9B; }
+.kpi-card.pink .kpi-value { color: var(--ely-pink); }
+.kpi-card.blue .kpi-value { color: var(--ely-blue); }
+.kpi-card.neutral .kpi-value { color: var(--ely-black); }
+
+.kpi-caption {
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  padding-top: 0.6rem;
+}
+
+/* ---- tables ---------------------------------------------------------- */
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  background: #fff;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.86rem;
+}
+
+caption { caption-side: top; text-align: left; }
+
+th, td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+td { border-right: 1px solid var(--border); }
+td:last-child, th:last-child { border-right: none; }
+
+th {
+  background: var(--bg-alt);
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-right: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+}
+
+.table-wrap table { border-radius: 0; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:nth-child(even) { background: #FBFCFD; }
+tbody tr:hover { background: var(--ely-cyan-tint); }
+
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.reason { color: var(--muted); font-size: 0.82rem; max-width: 32rem; }
+.error-cell { color: var(--fail); font-size: 0.82rem; }
+.summary-table td, .summary-table th { white-space: nowrap; }
+.detail-table td.reason, .detail-table td.input { white-space: normal; }
+
+/* ---- badges (pass/fail/status) -------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.badge.pass { background: var(--pass-tint); color: var(--pass); }
+.badge.fail { background: var(--fail-tint); color: var(--fail); }
+.badge.neutral { background: var(--bg-alt); color: var(--muted); }
+.badge.pink { background: var(--ely-pink-tint); color: var(--ely-pink); }
+.badge.cyan { background: var(--ely-cyan-tint); color: #0C7C9B; }
+.badge.blue { background: var(--ely-blue-tint); color: var(--ely-blue); }
+
+/* kept for backward-compat class names used elsewhere */
+.pass { color: var(--pass); font-weight: 600; }
+.fail { color: var(--fail); font-weight: 600; }
+
+/* ---- score bar -------------------------------------------------------- */
+
+.bar-cell { display: flex; align-items: center; gap: 0.5rem; }
+.bar-track { flex: 1; background: var(--bg-alt); border-radius: 3px; height: 8px; min-width: 60px; }
+.bar-fill { background: var(--pass); border-radius: 3px; height: 8px; }
+.bar-fill.low { background: var(--fail); }
+
+/* ---- footer ------------------------------------------------------------ */
+
+.report-footer {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--muted);
+}

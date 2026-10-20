@@ -1,0 +1,279 @@
+# elyaeval Tekton Pipeline   shipped inside the elyaeval package; render or
+# apply it (version-matched) with `elyaeval ci render` / `elyaeval ci apply`.
+#
+# One Pipeline for every mission: a mission only commits its own
+# PipelineRun (`elyaeval init-ci`) pointing at its repo, test file and
+# running app. The app under test must already be running at sut-url.
+#
+#   fetch-source -> setup-env -> run-suite -> check-results  (thresholds)
+#                                          -> check-budget   (budget)
+#   finally: report-results (upload to blob), check-regression (baseline gate,
+#            promotion only when every gate above passed)
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: elyaeval
+spec:
+  params:
+    # --- what to evaluate ----------------------------------------------------
+    - name: repo-url
+      type: string
+      description: Public HTTPS URL of the mission repo.
+    - name: revision
+      type: string
+      default: main
+      description: Branch, tag or commit SHA to evaluate.
+    - name: sut-path
+      type: string
+      default: "."
+      description: Folder (relative to the repo root) holding the test file and its goldens/config.
+    - name: test-file
+      type: string
+      description: The elyaeval test file, relative to sut-path (output of `elyaeval init`).
+    - name: sut-url
+      type: string
+      description: Base URL of the RUNNING app, reachable from inside the cluster (APP_URL in tests).
+    # --- the evaluation environment ------------------------------------------
+    - name: runner-image
+      type: string
+      default: "__ELYAEVAL_RUNNER_IMAGE__"
+      description: elyaeval runner image (elyaeval + DeepEval + judge SDKs). Pinned per elyaeval version.
+    - name: elyaeval-package-spec
+      type: string
+      default: ""
+      description: OPT-IN pip spec to override the image's elyaeval (e.g. a git tag); empty = use the image's.
+    - name: sut-requirements-file
+      type: string
+      default: ""
+      description: OPT-IN, component suites only (they import the app in-process). Relative to sut-path.
+    - name: sut-env-secret-name
+      type: string
+      default: elyaeval-sut-env-unset
+      description: OPT-IN Secret with env vars for in-process app code (component suites).
+    # --- judge (each mission brings its own) ---------------------------------
+    - name: judge-provider
+      type: string
+      description: ollama, openai, anthropic, azure_openai, gemini, bedrock, litellm, openai_compatible (alias local), deepseek, openrouter, grok, custom.
+    - name: judge-model-name
+      type: string
+    - name: judge-model-base-url
+      type: string
+      default: ""
+    - name: judge-model-format
+      type: string
+      default: json
+      description: Only for openai_compatible/local judges.
+    - name: judge-api-key-secret-name
+      type: string
+      default: judge-model-credentials
+    - name: judge-api-key-secret-key
+      type: string
+      default: api-key
+    - name: judge-max-calls-per-minute
+      type: string
+      default: ""
+    # --- run shape -----------------------------------------------------------
+    - name: ci-stage
+      type: string
+      default: ""
+      description: per_commit / merge / nightly / release (cumulative); empty = the test file's own.
+    - name: repeats
+      type: string
+      default: "1"
+    # --- budget --------------------------------------------------------------
+    - name: budget-usd
+      type: string
+      default: ""
+    - name: budget-seconds
+      type: string
+      default: ""
+    - name: budget-tokens
+      type: string
+      default: ""
+    - name: budget-calls
+      type: string
+      default: ""
+    - name: budget-on-exceed
+      type: string
+      default: ""
+    # --- results storage (Azure Blob / Azurite) ------------------------------
+    - name: blob-container
+      type: string
+      description: Container for this mission's results and baselines (created if missing).
+    - name: blob-connection-string-secret-name
+      type: string
+      default: blob-storage-credentials
+    - name: blob-connection-string-secret-key
+      type: string
+      default: connection-string
+    # --- regression gate -----------------------------------------------------
+    - name: regression-tolerance
+      type: string
+      default: ""
+    - name: regression-alpha
+      type: string
+      default: ""
+    - name: max-error-rate-increase
+      type: string
+      default: ""
+    - name: max-pass-rate-drop
+      type: string
+      default: ""
+    - name: allow-metadata-mismatch
+      type: string
+      default: "false"
+    - name: promote-baseline
+      type: string
+      default: "false"
+      description: '"true" makes THIS run the new baseline   only if every gate passes.'
+  workspaces:
+    - name: source
+  tasks:
+    - name: fetch-source
+      taskRef:
+        name: elyaeval-fetch-source
+      params:
+        - name: repo-url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: setup-env
+      runAfter: [fetch-source]
+      taskRef:
+        name: elyaeval-setup-env
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: sut-path
+          value: $(params.sut-path)
+        - name: sut-requirements-file
+          value: $(params.sut-requirements-file)
+        - name: elyaeval-package-spec
+          value: $(params.elyaeval-package-spec)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: run-suite
+      runAfter: [setup-env]
+      taskRef:
+        name: elyaeval-run-suite
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: sut-path
+          value: $(params.sut-path)
+        - name: sut-url
+          value: $(params.sut-url)
+        - name: test-file
+          value: $(params.test-file)
+        - name: commit
+          value: $(tasks.fetch-source.results.commit)
+        - name: judge-provider
+          value: $(params.judge-provider)
+        - name: judge-model-name
+          value: $(params.judge-model-name)
+        - name: judge-model-base-url
+          value: $(params.judge-model-base-url)
+        - name: judge-model-format
+          value: $(params.judge-model-format)
+        - name: judge-api-key-secret-name
+          value: $(params.judge-api-key-secret-name)
+        - name: judge-api-key-secret-key
+          value: $(params.judge-api-key-secret-key)
+        - name: judge-max-calls-per-minute
+          value: $(params.judge-max-calls-per-minute)
+        - name: sut-env-secret-name
+          value: $(params.sut-env-secret-name)
+        - name: ci-stage
+          value: $(params.ci-stage)
+        - name: repeats
+          value: $(params.repeats)
+        - name: budget-usd
+          value: $(params.budget-usd)
+        - name: budget-seconds
+          value: $(params.budget-seconds)
+        - name: budget-tokens
+          value: $(params.budget-tokens)
+        - name: budget-calls
+          value: $(params.budget-calls)
+        - name: budget-on-exceed
+          value: $(params.budget-on-exceed)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: check-results
+      runAfter: [run-suite]
+      taskRef:
+        name: elyaeval-check-results
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: check-budget
+      runAfter: [run-suite]
+      taskRef:
+        name: elyaeval-check-budget
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+      workspaces:
+        - name: source
+          workspace: source
+
+  finally:
+    - name: report-results
+      taskRef:
+        name: elyaeval-report-results
+      params:
+        - name: blob-container
+          value: $(params.blob-container)
+        - name: blob-connection-string-secret-name
+          value: $(params.blob-connection-string-secret-name)
+        - name: blob-connection-string-secret-key
+          value: $(params.blob-connection-string-secret-key)
+        - name: run-id
+          value: $(context.pipelineRun.name)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: check-regression
+      taskRef:
+        name: elyaeval-check-regression
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: blob-container
+          value: $(params.blob-container)
+        - name: blob-connection-string-secret-name
+          value: $(params.blob-connection-string-secret-name)
+        - name: blob-connection-string-secret-key
+          value: $(params.blob-connection-string-secret-key)
+        - name: run-id
+          value: $(context.pipelineRun.name)
+        - name: pipeline-status
+          value: $(tasks.status)
+        - name: regression-tolerance
+          value: $(params.regression-tolerance)
+        - name: regression-alpha
+          value: $(params.regression-alpha)
+        - name: max-error-rate-increase
+          value: $(params.max-error-rate-increase)
+        - name: max-pass-rate-drop
+          value: $(params.max-pass-rate-drop)
+        - name: allow-metadata-mismatch
+          value: $(params.allow-metadata-mismatch)
+        - name: promote-baseline
+          value: $(params.promote-baseline)
+      workspaces:
+        - name: source
+          workspace: source

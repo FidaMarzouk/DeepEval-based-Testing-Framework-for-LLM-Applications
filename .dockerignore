@@ -1,0 +1,14 @@
+.git/
+.venv/
+venv/
+build/
+dist/
+tests/
+report/
+ci/
+.elyaeval_cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+**/__pycache__/
+*.egg-info/

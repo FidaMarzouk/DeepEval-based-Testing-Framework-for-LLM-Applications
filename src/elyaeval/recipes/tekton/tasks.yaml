@@ -1,0 +1,566 @@
+---
+# elyaeval Tekton Tasks   shipped inside the elyaeval package. Render or
+# apply them (version-matched) with:
+#     elyaeval ci render --output-dir ci/      # write pipeline.yaml + tasks.yaml
+#     elyaeval ci apply -n <namespace>         # kubectl apply them
+#
+# Every Python step runs in the elyaeval runner image (params.runner-image):
+# elyaeval + DeepEval + judge-provider SDKs preinstalled, so nothing is
+# pip-installed at run time unless a PipelineRun opts in. Task names are
+# prefixed "elyaeval-" so they can share a namespace with other teams' tasks.
+
+# elyaeval-fetch-source: clone the mission repo at a branch, tag or commit.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-fetch-source
+spec:
+  params:
+    - name: repo-url
+      type: string
+      description: Public HTTPS URL of the mission repo (the one containing the elyaeval test file).
+    - name: revision
+      type: string
+      description: Branch, tag or full commit SHA.
+  results:
+    - name: commit
+      description: The exact commit that was evaluated.
+  workspaces:
+    - name: source
+  steps:
+    - name: clone
+      image: alpine/git:2.45.2
+      env:
+        - name: HOME
+          value: /tmp
+      script: |
+        #!/bin/sh
+        set -eu
+        WS="$(workspaces.source.path)"
+        # a reused workspace must not leak a previous run's code or reports
+        rm -rf "$WS/repo" "$WS/report" "$WS/.python-packages"
+        git init -q "$WS/repo"
+        cd "$WS/repo"
+        git remote add origin "$(params.repo-url)"
+        # fetch by name works for branches, tags and (on GitHub) commit SHAs
+        git fetch -q --depth 1 origin "$(params.revision)"
+        git checkout -q --detach FETCH_HEAD
+        COMMIT=$(git rev-parse HEAD)
+        printf "%s" "$COMMIT" > "$(results.commit.path)"
+        echo "✓ $(params.repo-url) @ $(params.revision) -> $COMMIT"
+
+---
+# elyaeval-setup-env: OPT-IN extra installs into the shared workspace. With
+# both params empty (the normal case) it does nothing: the runner image
+# already contains elyaeval. Use sut-requirements-file only for component
+# suites that import the app's own modules in-process, and
+# elyaeval-package-spec only to try a different elyaeval build than the image's.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-setup-env
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: sut-path
+      type: string
+    - name: sut-requirements-file
+      type: string
+      default: ""
+    - name: elyaeval-package-spec
+      type: string
+      default: ""
+  workspaces:
+    - name: source
+  steps:
+    - name: install
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)/repo/$(params.sut-path)
+      script: |
+        #!/bin/sh
+        set -eu
+        TARGET="$(workspaces.source.path)/.python-packages"
+        mkdir -p "$TARGET"
+        if [ -n "$(params.elyaeval-package-spec)" ]; then
+          pip install --no-cache-dir --target "$TARGET" "$(params.elyaeval-package-spec)"
+          echo "✓ elyaeval overridden from $(params.elyaeval-package-spec)"
+        fi
+        if [ -n "$(params.sut-requirements-file)" ]; then
+          if [ ! -f "$(params.sut-requirements-file)" ]; then
+            echo "sut-requirements-file '$(params.sut-requirements-file)' not found under $(params.sut-path)" >&2
+            exit 1
+          fi
+          pip install --no-cache-dir --target "$TARGET" -r "$(params.sut-requirements-file)"
+          echo "✓ SUT requirements installed from $(params.sut-requirements-file)"
+        fi
+        elyaeval --help >/dev/null && echo "✓ elyaeval $(python -c 'import elyaeval; print(elyaeval.__version__)') ready"
+
+---
+# elyaeval-run-suite: run the mission's elyaeval test file against the
+# already-running app (sut-url). Never fails on test outcomes   the gating
+# tasks below read the reports it leaves in the workspace.
+#
+# Judge: provider-agnostic via ELYAEVAL_JUDGE_* (elyaeval.core.judge): ollama,
+# openai, anthropic, azure_openai, gemini, bedrock, litellm, openai_compatible
+# (alias local), deepseek, openrouter, grok, custom. Each mission brings its
+# own judge; the key comes from the judge Secret.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-run-suite
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: sut-path
+      type: string
+    - name: sut-url
+      type: string
+      description: Base URL of the running app, reachable from inside the cluster (exported as APP_URL).
+    - name: test-file
+      type: string
+      description: Path of the elyaeval test file, relative to sut-path.
+    - name: commit
+      type: string
+      default: ""
+    - name: judge-provider
+      type: string
+    - name: judge-model-name
+      type: string
+    - name: judge-model-base-url
+      type: string
+      default: ""
+    - name: judge-model-format
+      type: string
+      default: json
+    - name: judge-api-key-secret-name
+      type: string
+    - name: judge-api-key-secret-key
+      type: string
+    - name: judge-max-calls-per-minute
+      type: string
+      default: ""
+    - name: sut-env-secret-name
+      type: string
+      default: elyaeval-sut-env-unset
+      description: OPT-IN Secret whose keys become env vars (component suites that run app code in-process).
+    - name: ci-stage
+      type: string
+      default: ""
+    - name: repeats
+      type: string
+      default: "1"
+    - name: budget-usd
+      type: string
+      default: ""
+    - name: budget-seconds
+      type: string
+      default: ""
+    - name: budget-tokens
+      type: string
+      default: ""
+    - name: budget-calls
+      type: string
+      default: ""
+    - name: budget-on-exceed
+      type: string
+      default: ""
+  workspaces:
+    - name: source
+  steps:
+    - name: run-pytest
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)/repo/$(params.sut-path)
+      envFrom:
+        - secretRef:
+            name: $(params.sut-env-secret-name)
+            optional: true
+      env:
+        - name: APP_URL
+          value: $(params.sut-url)
+        - name: PYTHONPATH
+          value: $(workspaces.source.path)/.python-packages
+        - name: DEEPEVAL_DISABLE_DOTENV
+          value: "1"
+        - name: ELYAEVAL_GIT_SHA
+          value: $(params.commit)
+        - name: JUDGE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.judge-api-key-secret-name)
+              key: $(params.judge-api-key-secret-key)
+      script: |
+        #!/bin/sh
+        set -eu
+        WS="$(workspaces.source.path)"
+
+        export ELYAEVAL_JUDGE_PROVIDER="$(params.judge-provider)"
+        export ELYAEVAL_JUDGE_MODEL="$(params.judge-model-name)"
+        export ELYAEVAL_JUDGE_API_KEY="$JUDGE_API_KEY"
+        export LOCAL_MODEL_FORMAT="$(params.judge-model-format)"
+        if [ -n "$(params.judge-model-base-url)" ]; then export ELYAEVAL_JUDGE_BASE_URL="$(params.judge-model-base-url)"; fi
+        if [ -n "$(params.judge-max-calls-per-minute)" ]; then export ELYAEVAL_JUDGE_MAX_CALLS_PER_MINUTE="$(params.judge-max-calls-per-minute)"; fi
+        if [ -n "$(params.ci-stage)" ]; then export ELYAEVAL_CI_STAGE="$(params.ci-stage)"; fi
+        if [ -n "$(params.budget-usd)" ]; then export ELYAEVAL_BUDGET_USD="$(params.budget-usd)"; fi
+        if [ -n "$(params.budget-seconds)" ]; then export ELYAEVAL_BUDGET_SECONDS="$(params.budget-seconds)"; fi
+        if [ -n "$(params.budget-tokens)" ]; then export ELYAEVAL_BUDGET_TOKENS="$(params.budget-tokens)"; fi
+        if [ -n "$(params.budget-calls)" ]; then export ELYAEVAL_BUDGET_CALLS="$(params.budget-calls)"; fi
+        if [ -n "$(params.budget-on-exceed)" ]; then export ELYAEVAL_BUDGET_ON_EXCEED="$(params.budget-on-exceed)"; fi
+
+        # fail fast, readably, on an invalid judge configuration
+        elyaeval judge
+
+        mkdir -p "$WS/report"
+        # || true: a failing golden must still leave its reports for the
+        # gating/reporting tasks; check-results is what fails the run
+        python -m pytest "$(params.test-file)" \
+          --elyaeval-repeats "$(params.repeats)" \
+          --junitxml="$WS/report/junit.xml" \
+          -q || true
+
+        # results CSV + HTML + run metadata + budget ledger
+        cp report/results_*.csv report/results_*.html report/results_*.meta.json report/budget_*.json \
+          "$WS/report/" 2>/dev/null || true
+        ls -1 "$WS/report"
+
+---
+# elyaeval-check-results: gate on the per-golden pass/fail (metric thresholds).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-check-results
+spec:
+  params:
+    - name: runner-image
+      type: string
+  workspaces:
+    - name: source
+  steps:
+    - name: check-junit
+      image: $(params.runner-image)
+      script: |
+        #!/bin/sh
+        set -eu
+        python - <<'EOF'
+        import os
+        import sys
+        import xml.etree.ElementTree as ET
+
+        path = "$(workspaces.source.path)/report/junit.xml"
+        if not os.path.exists(path):
+            print("✗ no junit.xml: the suite never ran (see the run-suite logs)")
+            sys.exit(1)
+        root = ET.parse(path).getroot()
+        suite = root if root.tag == "testsuite" else root.find("testsuite")
+        failures = int(suite.get("failures", 0))
+        errors = int(suite.get("errors", 0))
+        skipped = int(suite.get("skipped", 0))
+        total = int(suite.get("tests", 0))
+        print(f"{total} tests, {failures} failures, {errors} errors, {skipped} skipped")
+        if total == 0:
+            print("✗ no tests collected (check test-file / ci-stage / goldens)")
+            sys.exit(1)
+        if failures or errors:
+            sys.exit(1)
+        EOF
+
+---
+# elyaeval-check-budget: fail the run if it exhausted its evaluation budget.
+# Budget-skipped goldens are pytest *skips*, which check-results doesn't count
+# as failures; this is the gate that makes them visible. budget-on-exceed=warn
+# never fails here.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-check-budget
+spec:
+  params:
+    - name: runner-image
+      type: string
+  workspaces:
+    - name: source
+  steps:
+    - name: check-budget
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -eu
+        elyaeval budget --fail-on-exhausted
+
+---
+# elyaeval-report-results: upload the run's reports to Azure Blob Storage
+# (Azurite locally): <run-id>_<suffix>.csv/.html/.meta.json per results CSV,
+# plus <run-id>_budget.json. Runs in `finally`, so failing runs are uploaded too.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-report-results
+spec:
+  params:
+    - name: blob-container
+      type: string
+    - name: blob-connection-string-secret-name
+      type: string
+    - name: blob-connection-string-secret-key
+      type: string
+    - name: run-id
+      type: string
+  workspaces:
+    - name: source
+  steps:
+    - name: upload-report
+      image: mcr.microsoft.com/azure-cli:2.65.0
+      env:
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: $(params.blob-connection-string-secret-name)
+              key: $(params.blob-connection-string-secret-key)
+      script: |
+        #!/bin/sh
+        set -eu
+        RUN_ID="$(params.run-id)"
+        CONTAINER="$(params.blob-container)"
+        REPORT="$(workspaces.source.path)/report"
+
+        az storage container create --name "$CONTAINER" --only-show-errors >/dev/null
+
+        upload() {  # upload <file> <blob-name>
+          az storage blob upload --container-name "$CONTAINER" --file "$1" --name "$2" \
+            --overwrite --only-show-errors >/dev/null
+          echo "✓ $2"
+        }
+
+        FOUND=0
+        for CSV in "$REPORT"/results_*.csv; do
+          [ -e "$CSV" ] || continue
+          FOUND=1
+          BASENAME=$(basename "$CSV" .csv)
+          SUFFIX=${BASENAME#results_}
+          upload "$CSV" "${RUN_ID}_${SUFFIX}.csv"
+          for EXT in html meta.json; do
+            if [ -f "$REPORT/${BASENAME}.${EXT}" ]; then upload "$REPORT/${BASENAME}.${EXT}" "${RUN_ID}_${SUFFIX}.${EXT}"; fi
+          done
+        done
+        for LEDGER in "$REPORT"/budget_*.json; do
+          [ -e "$LEDGER" ] || continue
+          upload "$LEDGER" "${RUN_ID}_budget.json"
+        done
+        [ "$FOUND" -eq 1 ] || echo "ℹ no results_*.csv in the workspace (the suite didn't run)   nothing to upload"
+
+---
+# elyaeval-check-regression: the ACROSS-RUNS gate. Compares this run against
+# the baseline_<suffix>.csv (+ .meta.json) stored in the blob container with
+# `elyaeval compare` (paired by golden id, statistical gate, error-rate gate,
+# judge-compatibility check), uploads the regression report, then gates.
+#
+# No baseline yet -> the comparison is skipped (self-bootstrapping).
+# promote-baseline="true" replaces the baseline with THIS run, but only when
+# every gate passed: the regular tasks (pipeline-status from $(tasks.status):
+# run-suite, check-results, check-budget) AND this comparison. A failing or
+# partial run can never become the baseline.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: elyaeval-check-regression
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: blob-container
+      type: string
+    - name: blob-connection-string-secret-name
+      type: string
+    - name: blob-connection-string-secret-key
+      type: string
+    - name: run-id
+      type: string
+    - name: pipeline-status
+      type: string
+      description: $(tasks.status) of the Pipeline's regular tasks (Succeeded/Completed/Failed/None).
+    - name: regression-tolerance
+      type: string
+      default: ""
+    - name: regression-alpha
+      type: string
+      default: ""
+    - name: max-error-rate-increase
+      type: string
+      default: ""
+    - name: max-pass-rate-drop
+      type: string
+      default: ""
+    - name: allow-metadata-mismatch
+      type: string
+      default: "false"
+    - name: promote-baseline
+      type: string
+      default: "false"
+  workspaces:
+    - name: source
+  steps:
+    - name: download-baseline
+      image: mcr.microsoft.com/azure-cli:2.65.0
+      env:
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: $(params.blob-connection-string-secret-name)
+              key: $(params.blob-connection-string-secret-key)
+      script: |
+        #!/bin/sh
+        set -eu
+        REPORT="$(workspaces.source.path)/report"
+        mkdir -p "$REPORT"
+        az storage container create --name "$(params.blob-container)" --only-show-errors >/dev/null
+        for CSV in "$REPORT"/results_*.csv; do
+          [ -e "$CSV" ] || continue
+          SUFFIX=$(basename "$CSV" .csv); SUFFIX=${SUFFIX#results_}
+          STABLE=$(echo "$SUFFIX" | sed -E 's/_[0-9]{8}T[0-9]{6}Z$//')
+          if az storage blob download --container-name "$(params.blob-container)" --name "baseline_${STABLE}.csv" \
+               --file "$REPORT/baseline_${STABLE}.csv" --only-show-errors >/dev/null 2>&1; then
+            echo "✓ baseline_${STABLE}.csv"
+            az storage blob download --container-name "$(params.blob-container)" --name "baseline_${STABLE}.meta.json" \
+              --file "$REPORT/baseline_${STABLE}.meta.json" --only-show-errors >/dev/null 2>&1 \
+              || echo "ℹ baseline_${STABLE} has no .meta.json (compatibility not checked)"
+          else
+            echo "ℹ no baseline_${STABLE}.csv yet   regression check skipped for it this run"
+          fi
+        done
+
+    - name: compare
+      image: $(params.runner-image)
+      env:
+        - name: REGRESSION_TOLERANCE
+          value: $(params.regression-tolerance)
+        - name: REGRESSION_ALPHA
+          value: $(params.regression-alpha)
+        - name: MAX_ERROR_RATE_INCREASE
+          value: $(params.max-error-rate-increase)
+        - name: MAX_PASS_RATE_DROP
+          value: $(params.max-pass-rate-drop)
+        - name: ALLOW_METADATA_MISMATCH
+          value: $(params.allow-metadata-mismatch)
+      script: |
+        #!/bin/sh
+        set -eu
+        # never exits non-zero itself: the outcome goes into a marker file so
+        # the regression report is uploaded before the gate step fails
+        REPORT="$(workspaces.source.path)/report"
+        MARKER="$REPORT/.regression_failed"
+        rm -f "$MARKER"
+        for CSV in "$REPORT"/results_*.csv; do
+          [ -e "$CSV" ] || continue
+          python - "$CSV" "$REPORT" <<'PYEOF' || echo "1" >> "$MARKER"
+        import os
+        import re
+        import sys
+
+        from elyaeval.cli import compare
+
+        csv_path, report_dir = sys.argv[1], sys.argv[2]
+        stem = os.path.basename(csv_path)[: -len(".csv")]
+        stable = re.sub(r"_\d{8}T\d{6}Z$", "", stem[len("results_"):])
+        baseline = os.path.join(report_dir, f"baseline_{stable}.csv")
+        if not os.path.exists(baseline):
+            sys.exit(0)
+
+
+        def opt_float(name):
+            value = os.environ.get(name, "").strip()
+            return float(value) if value else None
+
+
+        exit_code = compare(
+            baseline,
+            csv_path,
+            tolerance=opt_float("REGRESSION_TOLERANCE"),
+            group_by="span_name,metric_name" if "component" in stable else "metric_name",
+            html_path=os.path.join(report_dir, f"regression_{stable}.html"),
+            alpha=opt_float("REGRESSION_ALPHA"),
+            max_error_rate_increase=opt_float("MAX_ERROR_RATE_INCREASE"),
+            max_pass_rate_drop=opt_float("MAX_PASS_RATE_DROP"),
+            allow_metadata_mismatch=os.environ.get("ALLOW_METADATA_MISMATCH") == "true",
+        )
+        if exit_code == 2:
+            print(f"✗ baseline_{stable} was scored by a different judge than this run: promote a new "
+                  "baseline (promote-baseline=true) or set allow-metadata-mismatch=true")
+        sys.exit(exit_code)
+        PYEOF
+        done
+        if [ -s "$MARKER" ]; then echo "✗ regression detected (gate fails after the report upload)"; else echo "✓ no regression"; fi
+
+    - name: upload-regression-report
+      image: mcr.microsoft.com/azure-cli:2.65.0
+      env:
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: $(params.blob-connection-string-secret-name)
+              key: $(params.blob-connection-string-secret-key)
+      script: |
+        #!/bin/sh
+        set -eu
+        for HTML in "$(workspaces.source.path)"/report/regression_*.html; do
+          [ -e "$HTML" ] || continue
+          az storage blob upload --container-name "$(params.blob-container)" --file "$HTML" \
+            --name "$(params.run-id)_$(basename "$HTML")" --overwrite --only-show-errors >/dev/null
+          echo "✓ $(params.run-id)_$(basename "$HTML")"
+        done
+
+    - name: check-regression-status
+      image: $(params.runner-image)
+      script: |
+        #!/bin/sh
+        set -eu
+        if [ -s "$(workspaces.source.path)/report/.regression_failed" ]; then
+          echo "✗ regression against the baseline"
+          exit 1
+        fi
+        echo "✓ nothing regressed"
+
+    - name: promote-baseline
+      image: mcr.microsoft.com/azure-cli:2.65.0
+      env:
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: $(params.blob-connection-string-secret-name)
+              key: $(params.blob-connection-string-secret-key)
+      script: |
+        #!/bin/sh
+        set -eu
+        # reached only if check-regression-status passed (Tekton stops a Task
+        # at its first failing step)
+        if [ "$(params.promote-baseline)" != "true" ]; then
+          echo "promote-baseline is not 'true'   baseline(s) unchanged"
+          exit 0
+        fi
+        case "$(params.pipeline-status)" in
+          Succeeded|Completed) ;;
+          *)
+            echo "✗ not promoting: the run's own gates did not all pass (tasks.status=$(params.pipeline-status))" >&2
+            exit 1
+            ;;
+        esac
+        REPORT="$(workspaces.source.path)/report"
+        PROMOTED=0
+        for CSV in "$REPORT"/results_*.csv; do
+          [ -e "$CSV" ] || continue
+          BASENAME=$(basename "$CSV" .csv); SUFFIX=${BASENAME#results_}
+          STABLE=$(echo "$SUFFIX" | sed -E 's/_[0-9]{8}T[0-9]{6}Z$//')
+          az storage blob upload --container-name "$(params.blob-container)" --file "$CSV" \
+            --name "baseline_${STABLE}.csv" --overwrite --only-show-errors >/dev/null
+          if [ -f "$REPORT/${BASENAME}.meta.json" ]; then
+            az storage blob upload --container-name "$(params.blob-container)" --file "$REPORT/${BASENAME}.meta.json" \
+              --name "baseline_${STABLE}.meta.json" --overwrite --only-show-errors >/dev/null
+          fi
+          PROMOTED=1
+          echo "✓ promoted $(basename "$CSV") -> baseline_${STABLE}.csv"
+        done
+        if [ "$PROMOTED" -eq 0 ]; then
+          echo "✗ promote-baseline=true but this run produced no results CSV" >&2
+          exit 1
+        fi
