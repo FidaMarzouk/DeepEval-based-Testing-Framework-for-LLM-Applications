@@ -107,6 +107,9 @@ def read_csv_rows(csv_path: str | Path) -> list[dict]:
         row["evaluation_cost"] = _to_float(row.get("evaluation_cost"))
         row["input_tokens"] = _to_int(row.get("input_tokens"))
         row["output_tokens"] = _to_int(row.get("output_tokens"))
+        row["tokens_estimated"] = bool(_to_bool(row.get("tokens_estimated")))
+        row["judge_calls"] = _to_int(row.get("judge_calls"))
+        row["judge_seconds"] = _to_float(row.get("judge_seconds"))
         row["repeat"] = _to_int(row.get("repeat")) or 0
         row["cached"] = bool(_to_bool(row.get("cached")))
     return rows
@@ -168,6 +171,14 @@ def metric_averages(rows: list[dict], group_keys: tuple[str, ...] = ("metric_nam
                       leave this None rather than 0).
       - tokens_n:     how many rows actually contributed a token count
                       same purpose as cost_n, for the same reason
+      - tokens_estimated: True if any of those counts is elyaeval's own
+                      estimate (the judge provider reported none)
+      - n_errors:     rows whose metric errored (no score: timeout, judge
+                      returned unparsable JSON, ...). They count as not
+                      passed, like the gate counts them, but are shown
+                      separately so an error isn't mistaken for a low score
+      - golden_count: distinct goldens in the group, errored ones included
+                      (n_goldens below only counts goldens with a score)
 
 
     Returns groups in first-seen order (matches CSV/golden run order)
@@ -210,6 +221,9 @@ def metric_averages(rows: list[dict], group_keys: tuple[str, ...] = ("metric_nam
         summary["total_input_tokens"] = sum(input_tokens_vals) if input_tokens_vals else None
         summary["total_output_tokens"] = sum(output_tokens_vals) if output_tokens_vals else None
         summary["tokens_n"] = len(input_tokens_vals) or len(output_tokens_vals)
+        summary["tokens_estimated"] = any(r.get("tokens_estimated") for r in group_rows)
+        summary["n_errors"] = sum(1 for r in group_rows if _is_error(r))
+        summary["golden_count"] = len({r.get("golden_id") for r in group_rows if r.get("golden_id")}) or len(group_rows)
         # uncertainty: bootstrap CI over per-golden means (repeats averaged
         # first, so repeats don't masquerade as extra goldens), and the
         # within-golden SD across repeats = run-to-run noise floor
@@ -239,6 +253,11 @@ def total_tokens(rows: list[dict]) -> tuple[Optional[int], Optional[int]]:
     inputs: list[int] = [r["input_tokens"] for r in rows if r.get("input_tokens") is not None]
     outputs: list[int] = [r["output_tokens"] for r in rows if r.get("output_tokens") is not None]
     return (sum(inputs) if inputs else None, sum(outputs) if outputs else None)
+
+
+def _is_error(row: dict) -> bool:
+    """The metric errored instead of producing a score."""
+    return bool(row.get("error")) and row.get("score") is None
 
 
 def overall_pass_rate(rows: list[dict]) -> Optional[float]:
@@ -275,10 +294,28 @@ def _fmt_cost(value: Optional[float]) -> str:
     return f"${value:.4f}"
 
 
-def _fmt_tokens(value: Optional[int]) -> str:
+def _fmt_tokens(value: Optional[int], estimated: bool = False, mark: str = "≈") -> str:
     """Thousands-separated integer, " " if None (unknown/unavailable
-    see total_tokens()'s docstring), never "0" standing in for unknown."""
-    return " " if value is None else f"{value:,}"
+    see total_tokens()'s docstring), never "0" standing in for unknown.
+    Estimates (elyaeval's meter, not the provider) are prefixed with `mark`
+    ("~" in terminal output, which may not be able to encode "≈")."""
+    if value is None:
+        return " "
+    return f"{mark}{value:,}" if estimated else f"{value:,}"
+
+
+def _fmt_seconds(value: Optional[float]) -> str:
+    if value is None:
+        return " "
+    return f"{value / 60:.1f} min" if value >= 120 else f"{value:.1f}s"
+
+
+def _pass_cell(s: dict) -> str:
+    """'pass/total' plus how many of the misses were errors, not low scores."""
+    text = f"{s['pass_count']}/{s['pass_total']}"
+    if s.get("n_errors"):
+        text += f", {s['n_errors']} error{'s' if s['n_errors'] > 1 else ''}"
+    return text
 
 
 def _score_bar(value: Optional[float], threshold: Optional[float]) -> str:
@@ -293,7 +330,9 @@ def _score_bar(value: Optional[float], threshold: Optional[float]) -> str:
     )
 
 
-def _pass_badge(success: Optional[bool]) -> str:
+def _pass_badge(success: Optional[bool], errored: bool = False) -> str:
+    if errored:
+        return '<span class="badge pink">● error</span>'
     if success is True:
         return '<span class="badge pass">● pass</span>'
     if success is False:
@@ -348,33 +387,40 @@ def _summary_table(rows: list[dict], group_keys: tuple[str, ...]) -> str:
     for s in summaries:
         key_cells = "".join(f"<td>{_esc(s[k])}</td>" for k in group_keys)
         cost_note = f" ({s['cost_n']}/{s['n']} priced)" if s["cost_n"] and s["cost_n"] < s["n"] else ""
-        tokens_note = f" ({s['tokens_n']}/{s['n']} reported)" if s["tokens_n"] and s["tokens_n"] < s["n"] else ""
+        tokens_note = f" ({s['tokens_n']}/{s['n']} rows)" if s["tokens_n"] and s["tokens_n"] < s["n"] else ""
+        estimated = s["tokens_estimated"]
         body_rows.append(
             "<tr>"
             f"{key_cells}"
-            f'<td class="num">{s["n_goldens"] or s["n"]}</td>'
+            f'<td class="num">{s["golden_count"]}</td>'
             f'<td>{_score_bar(s["avg_score"], s["threshold"])}</td>'
             f'<td class="num">{_fmt_ci(s["ci_low"], s["ci_high"])}</td>'
             f'<td class="num">{_fmt_score(s["noise_sd"])}</td>'
             f'<td class="num">{_fmt_score(s["min_score"])}</td>'
             f'<td class="num">{_fmt_score(s["max_score"])}</td>'
             f'<td class="num">{_fmt_pct(s["pass_rate"])} '
-            f'<span class="reason">({s["pass_count"]}/{s["pass_total"]})</span></td>'
+            f'<span class="reason">({_esc(_pass_cell(s))})</span></td>'
             f'<td class="num">{_fmt_score(s["threshold"])}</td>'
             f'<td>{_esc(s["evaluation_model"] or " ")}</td>'
             f'<td class="num">{_fmt_cost(s["total_cost"])}'
             f'<span class="reason">{cost_note}</span></td>'
-            f'<td class="num">{_fmt_tokens(s["total_input_tokens"])}'
+            f'<td class="num">{_fmt_tokens(s["total_input_tokens"], estimated)}'
             f'<span class="reason">{tokens_note}</span></td>'
-            f'<td class="num">{_fmt_tokens(s["total_output_tokens"])}</td>'
+            f'<td class="num">{_fmt_tokens(s["total_output_tokens"], estimated)}</td>'
             "</tr>"
         )
+    if any(s["tokens_estimated"] for s in summaries):
+        footnote = ('<p class="reason">≈ tokens estimated by elyaeval from prompt/reply size '
+                    "(~4 characters per token): the judge provider reports none.</p>")
+    else:
+        footnote = ""
 
     return (
         '<div class="table-wrap"><table class="summary-table">'
         f"<thead><tr>{head_html}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table></div>"
+        f"{footnote}"
     )
 
 
@@ -393,6 +439,7 @@ def _detail_table(rows: list[dict], extra_columns: tuple[str, ...] = ()) -> str:
         "Cost",
         "In tokens",
         "Out tokens",
+        "Judge time",
         "Reason / error",
     ]
     head_html = "".join(f"<th>{_esc(h)}</th>" for h in headers)
@@ -406,6 +453,14 @@ def _detail_table(rows: list[dict], extra_columns: tuple[str, ...] = ()) -> str:
         metric_val = _esc(r.get("metric_name", ""))
         reason = r.get("error") or r.get("reason") or ""
         reason_class = "error-cell" if r.get("error") else "reason"
+        estimated = r.get("tokens_estimated", False)
+        if r.get("cached"):
+            judge_time = "cached"
+        elif r.get("judge_seconds") is not None:
+            calls = r.get("judge_calls") or 0
+            judge_time = f"{_fmt_seconds(r['judge_seconds'])} · {calls} call{'s' if calls != 1 else ''}"
+        else:
+            judge_time = " "
         body_rows.append(
             "<tr>"
             f"{cells}"
@@ -414,11 +469,12 @@ def _detail_table(rows: list[dict], extra_columns: tuple[str, ...] = ()) -> str:
             f"<td>{metric_val}</td>"
             f'<td class="num">{_fmt_score(r.get("score"))}</td>'
             f'<td class="num">{_fmt_score(r.get("threshold"))}</td>'
-            f"<td>{_pass_badge(r.get('success'))}</td>"
+            f"<td>{_pass_badge(r.get('success'), _is_error(r))}</td>"
             f'<td>{_esc(r.get("evaluation_model") or " ")}</td>'
             f'<td class="num">{_fmt_cost(r.get("evaluation_cost"))}</td>'
-            f'<td class="num">{_fmt_tokens(r.get("input_tokens"))}</td>'
-            f'<td class="num">{_fmt_tokens(r.get("output_tokens"))}</td>'
+            f'<td class="num">{_fmt_tokens(r.get("input_tokens"), estimated)}</td>'
+            f'<td class="num">{_fmt_tokens(r.get("output_tokens"), estimated)}</td>'
+            f'<td class="num">{_esc(judge_time)}</td>'
             f'<td class="{reason_class}">{_esc(reason)}</td>'
             "</tr>"
         )
@@ -428,6 +484,78 @@ def _detail_table(rows: list[dict], extra_columns: tuple[str, ...] = ()) -> str:
         f"<thead><tr>{head_html}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table></div>"
+    )
+
+
+def ledger_goldens_for(csv_path: str | Path) -> list[dict]:
+    """The per-golden usage entries (app latency/tokens/cost, judge time)
+    of the run that wrote csv_path, read from the budget ledger next to it
+    (report/budget_<run ts>.json, written by the pytest plugin before the
+    HTML is rendered). [] if there is no ledger."""
+    import json
+
+    csv_path = Path(csv_path)
+    run_ts = csv_path.stem.rsplit("_", 1)[-1]
+    ledger = csv_path.with_name(f"budget_{run_ts}.json")
+    try:
+        return list(json.loads(ledger.read_text(encoding="utf-8")).get("goldens") or [])
+    except (OSError, ValueError):
+        return []
+
+
+def _usage_table(rows: list[dict], golden_usage: list[dict]) -> str:
+    """One row per golden (and repeat): what the app under test spent
+    answering it, and what judging it cost. App figures come from the
+    usage the app reported (see run_contracts.SUTUsage); judge figures from
+    the CSV rows, i.e. elyaeval's meter when the provider reports nothing."""
+    judge: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for r in rows:
+        key = (r.get("golden_id"), r.get("repeat") or 0)
+        if key not in judge:
+            judge[key] = {"priority": r.get("priority"), "calls": None, "in": None, "out": None, "estimated": False}
+            order.append(key)
+        j = judge[key]
+        for field, col in (("calls", "judge_calls"), ("in", "input_tokens"), ("out", "output_tokens")):
+            if r.get(col) is not None:
+                j[field] = (j[field] or 0) + r[col]
+        j["estimated"] = j["estimated"] or bool(r.get("tokens_estimated"))
+    app = {(g.get("golden_id"), g.get("repeat") or 0): g for g in golden_usage}
+    if not app and not any(j["calls"] for j in judge.values()):
+        return ""
+
+    show_repeat = any(repeat for _, repeat in order)
+    headers = ["Golden Id"] + (["Repeat"] if show_repeat else []) + [
+        "Priority", "App latency", "App in tokens", "App out tokens", "App cost",
+        "Judge time", "Judge calls", "Judge in tokens", "Judge out tokens",
+    ]
+    head_html = "".join(f"<th>{_esc(h)}</th>" for h in headers)
+    body_rows = []
+    for key in order:
+        j, g = judge[key], app.get(key, {})
+        repeat_cell = f'<td class="num">{key[1]}</td>' if show_repeat else ""
+        body_rows.append(
+            "<tr>"
+            f"<td>{_esc(key[0])}</td>{repeat_cell}"
+            f"<td>{_esc(j['priority'] or '')}</td>"
+            f'<td class="num">{_fmt_seconds(g.get("sut_seconds"))}</td>'
+            f'<td class="num">{_fmt_tokens(g.get("sut_input_tokens"))}</td>'
+            f'<td class="num">{_fmt_tokens(g.get("sut_output_tokens"))}</td>'
+            f'<td class="num">{_fmt_cost(g.get("sut_cost"))}</td>'
+            f'<td class="num">{_fmt_seconds(g.get("judge_seconds"))}</td>'
+            f'<td class="num">{_fmt_tokens(j["calls"])}</td>'
+            f'<td class="num">{_fmt_tokens(j["in"], j["estimated"])}</td>'
+            f'<td class="num">{_fmt_tokens(j["out"], j["estimated"])}</td>'
+            "</tr>"
+        )
+    return (
+        '<h2 class="section-label cyan">Per-golden usage</h2>'
+        '<div class="table-wrap"><table class="summary-table">'
+        f"<thead><tr>{head_html}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table></div>"
+        '<p class="reason">App figures are what the app under test reported for its own call '
+        "(blank: it reported none). Judge time includes every metric's judge calls and retries.</p>"
     )
 
 
@@ -463,6 +591,7 @@ def render_html_report(
     title: Optional[str] = None,
     group_keys: tuple[str, ...] = ("metric_name",),
     budget: Optional[dict] = None,
+    golden_usage: Optional[list[dict]] = None,
 ) -> Path:
     """
     Build a single self-contained HTML file (inline CSS, no external
@@ -474,8 +603,11 @@ def render_html_report(
       2. a per-metric (or per-`group_keys`) summary table: average score,
          min/max, pass rate, and the threshold, computed once across every
          golden that ran in this suite;
-      3. the full per-golden/per-metric detail table the CSV already has,
-         with pass/fail badges and a score bar per row.
+      3. per-golden usage: the app's latency/tokens/cost and the judge's
+         time/calls/tokens (`golden_usage`: the run's budget-ledger entries,
+         by default read from the ledger next to `csv_path`);
+      4. the full per-golden/per-metric detail table the CSV already has,
+         with pass/fail/error badges and a score bar per row.
 
     `html_path` defaults to the same filename as `csv_path` with a .html
     extension, so an uploaded CSV and its HTML sibling are always easy to
@@ -493,7 +625,12 @@ def render_html_report(
     run_cost = total_cost(rows)
     run_input_tokens, run_output_tokens = total_tokens(rows)
     run_pass_rate = overall_pass_rate(rows)
+    n_errors = sum(1 for r in rows if _is_error(r))
     n_goldens = len({r.get("golden_id") for r in rows if r.get("golden_id")}) or len(rows)
+    if golden_usage is None:
+        golden_usage = ledger_goldens_for(csv_path)
+    golden_ids = {r.get("golden_id") for r in rows}
+    golden_usage = [g for g in golden_usage if g.get("golden_id") in golden_ids]
 
     header = _brand_header(
         eyebrow="Evaluation report",
@@ -510,7 +647,7 @@ def render_html_report(
         + _kpi_card(
             "Pass rate", "cyan",
             _fmt_pct(run_pass_rate),
-            "Across every scored row",
+            f"Across every metric row · {n_errors} errored" if n_errors else "Across every metric row",
         )
         + _cost_card(run_cost, budget)
         + _usage_card(run_input_tokens, run_output_tokens, budget)
@@ -531,6 +668,7 @@ def render_html_report(
 {kpi_html}
 <h2 class="section-label">Per-metric summary</h2>
 {_summary_table(rows, group_keys)}
+{_usage_table(rows, golden_usage)}
 <h2 class="section-label pink">Per-golden detail</h2>
 {_detail_table(rows, extra_columns)}
 <div class="report-footer">Generated by elyaeval &middot; {_esc(csv_path.name)}</div>
@@ -563,22 +701,28 @@ def print_metric_averages(
     label_width = max(label_width, len("metric"))
     write(
         f"{'metric':<{label_width}}  {'avg':>6}  {'95% CI':>12}  {'noise':>5}  {'min':>6}  {'max':>6}  "
-        f"{'pass':>10}  {'cost':>10}  {'in tok':>10}  {'out tok':>10}  n"
+        f"{'pass':>14}  {'cost':>10}  {'in tok':>10}  {'out tok':>10}  n"
     )
-    write("-" * (label_width + 95))
+    write("-" * (label_width + 99))
     for s in summaries:
         label = " / ".join(str(s[k]) for k in group_keys)
-        pass_str = f"{s['pass_count']}/{s['pass_total']}" if s["pass_total"] else " "
+        pass_str = _pass_cell(s) if s["pass_total"] else " "
+        estimated = s["tokens_estimated"]
         write(
             f"{label:<{label_width}}  {_fmt_score(s['avg_score']):>6}  "
             f"{_fmt_ci(s['ci_low'], s['ci_high']):>12}  {_fmt_score(s['noise_sd']):>5}  "
             f"{_fmt_score(s['min_score']):>6}  {_fmt_score(s['max_score']):>6}  "
-            f"{pass_str:>10}  {_fmt_cost(s['total_cost']):>10}  "
-            f"{_fmt_tokens(s['total_input_tokens']):>10}  {_fmt_tokens(s['total_output_tokens']):>10}  {s['n']}"
+            f"{pass_str:>14}  {_fmt_cost(s['total_cost']):>10}  "
+            f"{_fmt_tokens(s['total_input_tokens'], estimated, '~'):>10}  "
+            f"{_fmt_tokens(s['total_output_tokens'], estimated, '~'):>10}  {s['n']}"
         )
     run_input_tokens, run_output_tokens = total_tokens(rows)
+    estimated = any(r.get("tokens_estimated") for r in rows)
     write(f"\nTotal judge cost for this run: {_fmt_cost(total_cost(rows))}")
-    write(f"Total tokens for this run: {_fmt_tokens(run_input_tokens)} in / {_fmt_tokens(run_output_tokens)} out")
+    write(
+        f"Total judge tokens for this run: {_fmt_tokens(run_input_tokens, estimated, '~')} in / "
+        f"{_fmt_tokens(run_output_tokens, estimated, '~')} out" + (" (~ estimated by elyaeval)" if estimated else "")
+    )
 
 
 # ---------------------------------------------------------------------------

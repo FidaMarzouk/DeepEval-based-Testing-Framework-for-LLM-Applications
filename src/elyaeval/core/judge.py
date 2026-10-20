@@ -23,12 +23,19 @@ the config, or — if neither is set — the provider's own variable
 Keys are never read from config files and never included in describe().
 
 Timeouts: DeepEval caps each test case at 180s by default — fine for hosted
-APIs, far too short for several metrics on a local model on a laptop GPU.
-`timeout_seconds` (env ELYAEVAL_JUDGE_TIMEOUT_SECONDS) sets that per-case
-budget; 0 disables DeepEval's timeouts. Unset, local providers (ollama,
+APIs, far too short for a local model on a laptop GPU. `timeout_seconds`
+(env ELYAEVAL_JUDGE_TIMEOUT_SECONDS) sets that per-case budget (one metric
+per case: evaluate_golden runs metrics one evaluate() call at a time); 0 disables DeepEval's timeouts. Unset, local providers (ollama,
 openai_compatible) get LOCAL_TIMEOUT_SECONDS and hosted providers keep
 DeepEval's default. An explicit DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE /
 DEEPEVAL_DISABLE_TIMEOUTS in the environment always wins.
+
+Reply length: a small local judge can get stuck repeating itself inside
+schema-constrained JSON and generate for many minutes. `max_output_tokens`
+(env ELYAEVAL_JUDGE_MAX_OUTPUT_TOKENS) caps every reply; local providers
+default to LOCAL_MAX_OUTPUT_TOKENS, 0 disables the cap. A runaway reply then
+fails fast as unparsable JSON instead of eating the test case's timeout. A
+cap set directly in `options.generation_kwargs` takes precedence.
 
 Rate limits (free tiers such as Groq): `max_calls_per_minute` and
 `max_tokens_per_minute` (estimated from prompt size) pace judge calls with a
@@ -90,10 +97,15 @@ PROVIDER_EXTRAS = {
 
 LOCAL_PROVIDERS = frozenset({"ollama", "openai_compatible"})
 LOCAL_TIMEOUT_SECONDS = 900.0
+LOCAL_MAX_OUTPUT_TOKENS = 2048
+
+# generation_kwargs key that caps a reply's length, per provider
+_MAX_OUTPUT_KEY = {"ollama": "num_predict", "openai_compatible": "max_tokens"}
 
 _ENV = {
     "provider": "ELYAEVAL_JUDGE_PROVIDER",
     "timeout_seconds": "ELYAEVAL_JUDGE_TIMEOUT_SECONDS",
+    "max_output_tokens": "ELYAEVAL_JUDGE_MAX_OUTPUT_TOKENS",
     "max_calls_per_minute": "ELYAEVAL_JUDGE_MAX_CALLS_PER_MINUTE",
     "max_tokens_per_minute": "ELYAEVAL_JUDGE_MAX_TOKENS_PER_MINUTE",
     "model": "ELYAEVAL_JUDGE_MODEL",
@@ -116,6 +128,7 @@ class JudgeConfig:
     temperature: Optional[float] = 0.0
     class_path: Optional[str] = None
     timeout_seconds: Optional[float] = None
+    max_output_tokens: Optional[int] = None
     max_calls_per_minute: Optional[int] = None
     max_tokens_per_minute: Optional[int] = None
     options: tuple[tuple[str, Any], ...] = ()
@@ -146,7 +159,7 @@ def resolve_judge_config(**overrides: Any) -> JudgeConfig:
     file_cfg = config_section("judge")
     unknown = set(file_cfg) - {
         "provider", "model", "base_url", "temperature", "class", "options", "api_key_env", "timeout_seconds",
-        "max_calls_per_minute", "max_tokens_per_minute",
+        "max_output_tokens", "max_calls_per_minute", "max_tokens_per_minute",
     }
     if "api_key" in file_cfg:
         raise JudgeConfigError(
@@ -170,6 +183,9 @@ def resolve_judge_config(**overrides: Any) -> JudgeConfig:
     timeout = pick("timeout_seconds")
     if timeout is None and provider in LOCAL_PROVIDERS:
         timeout = LOCAL_TIMEOUT_SECONDS
+    max_output = _opt_int(pick("max_output_tokens"))
+    if max_output is None and provider in LOCAL_PROVIDERS:
+        max_output = LOCAL_MAX_OUTPUT_TOKENS
 
     api_key = overrides.get("api_key") or os.environ.get(API_KEY_ENV) or None
     if api_key is None and file_cfg.get("api_key_env"):
@@ -177,6 +193,12 @@ def resolve_judge_config(**overrides: Any) -> JudgeConfig:
 
     options = dict(file_cfg.get("options", {}))
     options.update(overrides.get("options") or {})
+    cap_key = _MAX_OUTPUT_KEY.get(provider)
+    if cap_key and max_output and max_output > 0:
+        # an explicit generation_kwargs cap in `options` wins
+        generation_kwargs = dict(options.get("generation_kwargs") or {})
+        generation_kwargs.setdefault(cap_key, max_output)
+        options["generation_kwargs"] = generation_kwargs
 
     cfg = JudgeConfig(
         provider=provider,
@@ -185,6 +207,7 @@ def resolve_judge_config(**overrides: Any) -> JudgeConfig:
         temperature=temperature,
         class_path=pick("class_path", "class"),
         timeout_seconds=None if timeout is None else float(timeout),
+        max_output_tokens=max_output,
         max_calls_per_minute=_opt_int(pick("max_calls_per_minute")),
         max_tokens_per_minute=_opt_int(pick("max_tokens_per_minute")),
         options=tuple(sorted(options.items())),

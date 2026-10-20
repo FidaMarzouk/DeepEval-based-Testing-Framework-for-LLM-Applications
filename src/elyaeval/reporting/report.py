@@ -15,6 +15,8 @@ That result becomes the CSV row(s) one per (golden, metric) and is
 also what the caller asserts on, so junit.xml keeps working unchanged.
 """
 
+import contextlib
+import io
 import time
 from pathlib import Path
 from typing import Optional
@@ -30,7 +32,7 @@ from deepeval.test_run.api import MetricData
 from ..core.cache import cache_key, get_result_cache, is_cacheable, judge_identity
 from ..core.dataset import golden_id as _stable_golden_id
 from ..core.run_contracts import SUTUsage
-from ..core.usage import METER, GoldenUsage, reported_judge_usage
+from ..core.usage import METER, GoldenUsage, JudgeCalls, reported_judge_usage
 from .results_csv import E2E_FIELDS, E2E_GROUP_KEYS, append_rows, current_repeat, metric_rows, new_report_path
 
 CSV_FIELDS = E2E_FIELDS
@@ -74,7 +76,8 @@ def evaluate_golden(
         assert result.success, result.name
 
     Runs `metrics` against `test_case` via evaluate() with test_cases=[test_case]
-    (a batch of exactly one), appends one CSV row per metric to csv_path, and
+    (a batch of exactly one, one metric per call so each row carries its own
+    judge calls/time/tokens), appends one CSV row per metric to csv_path, and
     returns the TestResult so the caller decides how to fail the pytest test.
     print_results/show_indicator are disabled.
 
@@ -106,23 +109,41 @@ def evaluate_golden(
     to_run = [i for i in range(len(metrics)) if i not in cached]
     test_result: Optional[TestResult] = None
     fresh: dict[str, MetricData] = {}
+    judge_usage: dict[str, JudgeCalls] = {}
     judge_seconds = 0.0
     if to_run:
         started = time.perf_counter()
-        result = evaluate(
-            test_cases=[test_case],
-            metrics=[metrics[i] for i in to_run],
-            display_config=DisplayConfig(show_indicator=False, print_results=False),
-            async_config=AsyncConfig(run_async=False),
-            error_config=ErrorConfig(ignore_errors=True),
-            # DeepEval's per-run cache file isn't used by elyaeval, and writing
-            # it once per golden races on Windows without pywin32 (shared-lock
-            # failure -> intermittent 'test_cases_lookup_map' crashes).
-            cache_config=CacheConfig(write_cache=False, use_cache=False),
-        )
+        # one evaluate() per metric, so the judge calls metered in between
+        # belong to that metric (DeepEval copies metric instances, so they
+        # can't be tagged directly); metrics run sequentially either way
+        fresh_data: list[MetricData] = []
+        for i in to_run:
+            before = METER.snapshot()
+            # print_results=False still prints DeepEval's run banner, once per
+            # call; results and errors are all in the returned metrics_data
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = evaluate(
+                    test_cases=[test_case],
+                    metrics=[metrics[i]],
+                    display_config=DisplayConfig(show_indicator=False, print_results=False),
+                    async_config=AsyncConfig(run_async=False),
+                    error_config=ErrorConfig(ignore_errors=True),
+                    # DeepEval's per-run cache file isn't used by elyaeval, and writing
+                    # it once per golden races on Windows without pywin32 (shared-lock
+                    # failure -> intermittent 'test_cases_lookup_map' crashes).
+                    cache_config=CacheConfig(write_cache=False, use_cache=False),
+                )
+            spent = METER.snapshot() - before
+            one = result.test_results[0]
+            test_result = test_result or one
+            for md in one.metrics_data or []:
+                fresh_data.append(md)
+                judge_usage.setdefault(md.name, spent)
         judge_seconds = time.perf_counter() - started
-        test_result = result.test_results[0]
-        fresh = {md.name: md for md in test_result.metrics_data or []}
+        assert test_result is not None
+        test_result.metrics_data = fresh_data
+        test_result.success = all(md.success for md in fresh_data if not md.flaky)
+        fresh = {md.name: md for md in fresh_data}
         if cache is not None:
             for i in (i for i in to_run if i in keys):
                 fresh_md = fresh.get(metrics[i].__name__)
@@ -169,6 +190,14 @@ def evaluate_golden(
     for row in rows:
         if row["metric_name"] in cached_names:  # nothing spent this run
             row.update(cached=True, evaluation_cost=0.0, input_tokens=0, output_tokens=0)
+            continue
+        spent = judge_usage.get(row["metric_name"])
+        if spent is None:
+            continue
+        row.update(judge_calls=spent.calls, judge_seconds=round(spent.seconds, 3))
+        if row["input_tokens"] is None and row["output_tokens"] is None and spent.calls:
+            # the provider reported nothing (e.g. Ollama): elyaeval's estimate
+            row.update(input_tokens=spent.prompt_tokens, output_tokens=spent.output_tokens, tokens_estimated=True)
     append_csv_rows(csv_path, rows)
 
     judge_cost, judge_tokens = reported_judge_usage(test_result.metrics_data or [], frozenset(cached_names))

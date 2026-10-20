@@ -8,6 +8,7 @@ runs (worker part files merged into one CSV) and component/span mode.
 import csv
 import importlib.util
 import json
+import os
 
 import pytest
 
@@ -193,6 +194,8 @@ def test_compare_cli_exit_codes(tmp_path):
         return subprocess.run(
             [sys.executable, "-m", "elyaeval.cli", "compare", *args],
             capture_output=True, text=True, encoding="utf-8", cwd=tmp_path,
+            # the child writes in the console's encoding otherwise (cp1252 on Windows)
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
 
     assert run("--baseline", base, "--candidate", same).returncode == 0

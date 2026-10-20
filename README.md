@@ -60,7 +60,7 @@ the `test_elyaeval_*.py` files a *mission* gets from `elyaeval init`. Run them w
 
 ```bash
 # in a mission repo: pinned to a release tag of this repo
-pip install "elyaeval[ollama] @ git+https://github.com/<owner>/<repo>.git@v0.1.0"
+pip install "elyaeval[ollama] @ git+https://github.com/<owner>/<repo>.git@v0.1.1"
 
 # framework development, from a checkout of this repo
 pip install -e ".[dev,ollama]"
@@ -82,14 +82,16 @@ provider = "ollama"            # see the table below
 model = "llama3.1"
 # base_url = "http://localhost:11434"
 # temperature = 0.0
-# timeout_seconds = 900        # per test case; 0 disables DeepEval's timeouts
+# timeout_seconds = 900        # per metric evaluation; 0 disables DeepEval's timeouts
+# max_output_tokens = 2048     # cap each judge reply (local default 2048; 0 = no cap)
 # options = { generation_kwargs = { num_ctx = 8192 } }   # provider-specific kwargs
 # max_calls_per_minute = 30    # pace rate-limited providers (see Cost budgeting)
 ```
 
 Any key can be overridden per run with environment variables   `ELYAEVAL_JUDGE_PROVIDER`,
 `ELYAEVAL_JUDGE_MODEL`, `ELYAEVAL_JUDGE_BASE_URL`, `ELYAEVAL_JUDGE_TEMPERATURE`,
-`ELYAEVAL_JUDGE_TIMEOUT_SECONDS`, `ELYAEVAL_JUDGE_CLASS`   which is how CI selects the judge.
+`ELYAEVAL_JUDGE_TIMEOUT_SECONDS`, `ELYAEVAL_JUDGE_MAX_OUTPUT_TOKENS`, `ELYAEVAL_JUDGE_CLASS`   which
+is how CI selects the judge.
 
 | `provider` | Backend | Extra to install |
 |---|---|---|
@@ -115,10 +117,14 @@ elyaeval judge          # resolved provider/model/base URL/timeout
 elyaeval judge --ping   # + one tiny schema-constrained call
 ```
 
-**Local models:** DeepEval caps each test case at 180 s, which is too short for several metrics on
-an 8B model on a laptop GPU; `ollama`/`openai_compatible` therefore default to 900 s per test case
-(`timeout_seconds` to change it). Prefer `provider = "ollama"` over the `/v1` endpoint: the native
-API constrains the judge's output to each metric's JSON schema.
+**Local models:** DeepEval caps each evaluation at 180 s, which is too short for a metric on an 8B
+model on a laptop GPU; `ollama`/`openai_compatible` therefore default to 900 s (`timeout_seconds`
+to change it). elyaeval evaluates one metric per DeepEval call, so the timeout applies per metric.
+Small local judges can also get stuck repeating themselves inside the JSON they're asked to return
+and generate for many minutes; local providers therefore cap every judge reply at 2048 tokens
+(`max_output_tokens`; 0 disables it). A runaway reply then fails in seconds, as an **error** row
+in the report, instead of eating the whole timeout. Prefer `provider = "ollama"` over the `/v1`
+endpoint: the native API constrains the judge's output to each metric's JSON schema.
 
 ### Thresholds
 
@@ -394,7 +400,12 @@ when a budget is set.
 
 **After a run**   `report/budget_<run>.json` holds limits, spend (with where each cost came from:
 reported / priced / unknown), skipped goldens and a per-golden ledger (judge time, cost, tokens,
-SUT tokens/cost/latency). The HTML report shows a Budget/Usage card.
+SUT tokens/cost/latency). The HTML report shows a Budget/Usage card and a **per-golden usage**
+table (the app's latency/tokens/cost next to the judge's time/calls/tokens). Every CSV row carries
+its own metric's `judge_calls`, `judge_seconds` and tokens; when the provider reports no tokens
+(e.g. Ollama), elyaeval fills in its own estimate (`tokens_estimated`, shown as `≈` in the
+report). Metrics that errored (timeout, unparsable judge reply) are shown as **error**, separately
+from low scores; they still count as not passed.
 
 ```bash
 elyaeval budget                      # summarize the latest ledger
@@ -408,8 +419,8 @@ Dockerfile ship inside this package, version-matched:
 
 ```bash
 # once per cluster
-docker build -f src/elyaeval/recipes/docker/runner.Dockerfile -t elyaeval-runner:0.1.0 .
-kind load docker-image elyaeval-runner:0.1.0 --name elyaeval     # or push to a registry
+docker build -f src/elyaeval/recipes/docker/runner.Dockerfile -t elyaeval-runner:0.1.1 .
+kind load docker-image elyaeval-runner:0.1.1 --name elyaeval     # or push to a registry
 elyaeval ci apply -n elyaeval
 
 # once per mission repo

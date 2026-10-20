@@ -12,6 +12,7 @@ this repo into the shared `elyaeval` Tekton Pipeline.
 """
 
 import argparse
+import sys
 from importlib import resources
 from pathlib import Path
 from typing import Optional
@@ -521,6 +522,11 @@ def judge(ping: bool = False) -> int:
 
 
 def main():
+    # reports print symbols (Δ, σ, ✓) that legacy consoles (Windows cp1252)
+    # can't encode: degrade them to "?" instead of crashing the command
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(prog="elyaeval")
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -126,7 +126,24 @@ def test_judge_instance_is_shared_per_config():
 
 def test_options_are_passed_through():
     judge = get_judge(provider="ollama", model="llama3.1", options={"generation_kwargs": {"num_ctx": 8192}})
-    assert judge.generation_kwargs == {"num_ctx": 8192}
+    assert judge.generation_kwargs == {"num_ctx": 8192, "num_predict": 2048}
+
+
+def test_local_judges_cap_reply_length_by_default():
+    assert get_judge(provider="ollama", model="llama3.1").generation_kwargs == {"num_predict": 2048}
+    local = get_judge(provider="openai_compatible", model="m", base_url="http://localhost:1234/v1", api_key="x")
+    assert local.generation_kwargs == {"max_tokens": 2048}
+    assert resolve_judge_config(provider="openai", model="gpt-4.1").max_output_tokens is None
+
+
+def test_reply_cap_is_configurable(monkeypatch):
+    assert get_judge(provider="ollama", model="llama3.1", max_output_tokens=512).generation_kwargs == {"num_predict": 512}
+    assert get_judge(provider="ollama", model="llama3.1", max_output_tokens=0).generation_kwargs == {}
+    # a cap set directly in options wins over the default
+    judge = get_judge(provider="ollama", model="llama3.1", options={"generation_kwargs": {"num_predict": 100}})
+    assert judge.generation_kwargs == {"num_predict": 100}
+    monkeypatch.setenv("ELYAEVAL_JUDGE_MAX_OUTPUT_TOKENS", "300")
+    assert get_judge(provider="ollama", model="llama3.1").generation_kwargs == {"num_predict": 300}
 
 
 def test_custom_class_provider(isolated_config, monkeypatch):

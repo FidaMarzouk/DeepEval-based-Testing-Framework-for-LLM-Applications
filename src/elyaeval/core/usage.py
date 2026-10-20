@@ -56,6 +56,24 @@ class GoldenUsage:
     sut_cost: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class JudgeCalls:
+    """Metered judge calls (tokens are estimates, see estimate_tokens)."""
+
+    calls: int = 0
+    seconds: float = 0.0
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+
+    def __sub__(self, other: JudgeCalls) -> JudgeCalls:
+        return JudgeCalls(
+            calls=self.calls - other.calls,
+            seconds=self.seconds - other.seconds,
+            prompt_tokens=self.prompt_tokens - other.prompt_tokens,
+            output_tokens=self.output_tokens - other.output_tokens,
+        )
+
+
 @dataclass
 class UsageMeter:
     judge_calls: int = 0
@@ -81,6 +99,17 @@ class UsageMeter:
             self.goldens.append(usage)
 
     # -- reading -----------------------------------------------------------
+    def snapshot(self) -> JudgeCalls:
+        """Judge-call counters so far; subtract two snapshots to attribute
+        the calls in between (e.g. one metric's evaluation) to their cause."""
+        with self._lock:
+            return JudgeCalls(
+                calls=self.judge_calls,
+                seconds=self.judge_call_seconds,
+                prompt_tokens=self.judge_prompt_tokens_estimated,
+                output_tokens=self.judge_output_tokens_estimated,
+            )
+
     def totals(self) -> dict[str, Any]:
         with self._lock:
             goldens = list(self.goldens)

@@ -39,6 +39,9 @@ E2E_FIELDS = [
     "evaluation_cost",
     "input_tokens",
     "output_tokens",
+    "tokens_estimated",
+    "judge_calls",
+    "judge_seconds",
     "cached",
 ]
 TRACED_FIELDS = E2E_FIELDS[:2] + ["span_name"] + E2E_FIELDS[2:]
@@ -134,7 +137,9 @@ def metric_rows(
     DeepEval's MetricData; a judge that doesn't report them leaves them
     None (blank in the CSV), never 0. DeepEval reports local judges (e.g.
     Ollama) as cost 0.0 with 0 tokens — that's "not reported", so it's
-    written blank too (elyaeval meters such judges itself, see core.usage)."""
+    written blank here; evaluate_golden() then fills the tokens from
+    elyaeval's own meter (tokens_estimated=True) along with the metric's
+    judge_calls/judge_seconds, see core.usage."""
     rows = []
     for md in _dedupe_metrics(test_result.metrics_data or []):
         cost, in_tok, out_tok = md.evaluation_cost, getattr(md, "input_tokens", None), getattr(md, "output_tokens", None)
@@ -156,6 +161,9 @@ def metric_rows(
             "evaluation_cost": cost,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
+            "tokens_estimated": False,
+            "judge_calls": None,
+            "judge_seconds": None,
             "cached": False,
         }
         if span_name is not None:
