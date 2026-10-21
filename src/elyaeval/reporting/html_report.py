@@ -424,66 +424,109 @@ def _summary_table(rows: list[dict], group_keys: tuple[str, ...]) -> str:
     )
 
 
-def _detail_table(rows: list[dict], extra_columns: tuple[str, ...] = ()) -> str:
-    if not rows:
-        return "<p><em>No rows in this report.</em></p>"
+def _judge_time(r: dict) -> str:
+    if r.get("cached"):
+        return "cached"
+    calls = r.get("judge_calls") or 0
+    if r.get("judge_seconds") is None or not calls:
+        return "—"  # deterministic metric, or nothing metered
+    return f"{_fmt_seconds(r['judge_seconds'])} · {calls} call{'s' if calls != 1 else ''}"
 
-    base_cols = ["golden_id", "priority"] + list(extra_columns) + ["input", "metric_name"]
-    headers = [c.replace("_", " ").title() for c in base_cols[:-1]] + [
-        "Output",
-        "Metric Name",
-        "Score",
-        "Threshold",
-        "Result",
-        "Judge model",
-        "Cost",
-        "In tokens",
-        "Out tokens",
-        "Judge time",
-        "Reason / error",
-    ]
-    head_html = "".join(f"<th>{_esc(h)}</th>" for h in headers)
 
-    body_rows = []
+def _text_block(label: str, text: str) -> str:
+    """A labelled block of the golden's own text, shown once per golden.
+    Long text collapses behind a <details> toggle."""
+    text = str(text or "")
+    if len(text) > 700:
+        body = (f'<details><summary>{_esc(text[:280])}… <span class="more">show all</span></summary>'
+                f"<div>{_esc(text)}</div></details>")
+    else:
+        body = _esc(text) if text else '<span class="reason">(empty)</span>'
+    return f'<div class="qa-block"><div class="qa-label">{_esc(label)}</div><div class="qa-text">{body}</div></div>'
+
+
+def _golden_groups(rows: list[dict], extra_columns: tuple[str, ...]) -> list[tuple[tuple, list[dict]]]:
+    """Rows grouped per golden (and repeat, and span for component reports),
+    in file order."""
+    order: list[tuple] = []
+    groups: dict[tuple, list[dict]] = {}
     for r in rows:
-        cells = "".join(f"<td>{_esc(r.get(c, ''))}</td>" for c in base_cols[:-2])
-        input_val = _esc(r.get("input", ""))
-        output = str(r.get("actual_output") or "")
-        output_val = _esc(output if len(output) <= 400 else output[:400] + "…")
-        metric_val = _esc(r.get("metric_name", ""))
+        key = (r.get("golden_id"), r.get("repeat") or 0, *(r.get(c, "") for c in extra_columns))
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(r)
+    return [(key, groups[key]) for key in order]
+
+
+def _golden_card(key: tuple, rows: list[dict], extra_columns: tuple[str, ...]) -> str:
+    golden_id, repeat, *extras = key
+    first = rows[0]
+    n_pass = sum(1 for r in rows if r.get("success") is True)
+    n_errors = sum(1 for r in rows if _is_error(r))
+    all_pass = n_pass == len(rows)
+    if all_pass:
+        verdict = f'<span class="badge pass">● passed {n_pass}/{len(rows)}</span>'
+    else:
+        note = f", {n_errors} error{'s' if n_errors > 1 else ''}" if n_errors else ""
+        verdict = f'<span class="badge fail">● failed · {n_pass}/{len(rows)} passed{note}</span>'
+    pills = []
+    if first.get("priority"):
+        pills.append(f'<span class="pill">Priority <strong>{_esc(first["priority"])}</strong></span>')
+    if repeat:
+        pills.append(f'<span class="pill">Repeat <strong>{_esc(repeat)}</strong></span>')
+    for col, value in zip(extra_columns, extras, strict=True):
+        pills.append(f'<span class="pill">{_esc(col.replace("_", " ").title())} <strong>{_esc(value)}</strong></span>')
+
+    metric_rows = []
+    for r in rows:
+        estimated = r.get("tokens_estimated", False)
+        tokens = (f'{_fmt_tokens(r.get("input_tokens"), estimated)} / {_fmt_tokens(r.get("output_tokens"), estimated)}'
+                  if r.get("input_tokens") is not None or r.get("output_tokens") is not None else "—")
+        cost = _fmt_cost(r.get("evaluation_cost"))
         reason = r.get("error") or r.get("reason") or ""
         reason_class = "error-cell" if r.get("error") else "reason"
-        estimated = r.get("tokens_estimated", False)
-        if r.get("cached"):
-            judge_time = "cached"
-        elif r.get("judge_seconds") is not None:
-            calls = r.get("judge_calls") or 0
-            judge_time = f"{_fmt_seconds(r['judge_seconds'])} · {calls} call{'s' if calls != 1 else ''}"
-        else:
-            judge_time = " "
-        body_rows.append(
+        metric_rows.append(
             "<tr>"
-            f"{cells}"
-            f'<td class="input">{input_val}</td>'
-            f'<td class="input">{output_val}</td>'
-            f"<td>{metric_val}</td>"
-            f'<td class="num">{_fmt_score(r.get("score"))}</td>'
+            f'<td class="metric-name">{_esc(r.get("metric_name", ""))}</td>'
+            f'<td class="score-cell">{_score_bar(r.get("score"), r.get("threshold"))}</td>'
             f'<td class="num">{_fmt_score(r.get("threshold"))}</td>'
             f"<td>{_pass_badge(r.get('success'), _is_error(r))}</td>"
-            f'<td>{_esc(r.get("evaluation_model") or " ")}</td>'
-            f'<td class="num">{_fmt_cost(r.get("evaluation_cost"))}</td>'
-            f'<td class="num">{_fmt_tokens(r.get("input_tokens"), estimated)}</td>'
-            f'<td class="num">{_fmt_tokens(r.get("output_tokens"), estimated)}</td>'
-            f'<td class="num">{_esc(judge_time)}</td>'
-            f'<td class="{reason_class}">{_esc(reason)}</td>'
+            f'<td class="judge">{_esc(r.get("evaluation_model") or "—")}</td>'
+            f'<td class="num">{tokens}{"" if cost.strip() == "" else f"<br><span class=reason>{cost}</span>"}</td>'
+            f'<td class="num">{_esc(_judge_time(r))}</td>'
+            f'<td class="{reason_class} why">{_esc(reason)}</td>'
             "</tr>"
         )
-
+    head = "".join(f"<th>{h}</th>" for h in (
+        "Metric", "Score", "Threshold", "Result", "Judge", "Judge tokens in / out", "Judge time", "Reason / error"))
     return (
-        '<div class="table-wrap"><table class="detail-table">'
-        f"<thead><tr>{head_html}</tr></thead>"
-        f"<tbody>{''.join(body_rows)}</tbody>"
-        "</table></div>"
+        f'<article class="golden-card{" all-pass" if all_pass else ""}">'
+        '<header class="golden-head">'
+        f'<div class="golden-title"><span class="golden-id">{_esc(golden_id)}</span>{"".join(pills)}</div>'
+        f"{verdict}</header>"
+        '<div class="qa-grid">'
+        f'{_text_block("Input", first.get("input", ""))}'
+        f'{_text_block("Output", first.get("actual_output", ""))}'
+        "</div>"
+        '<div class="table-wrap"><table class="metric-table">'
+        f"<thead><tr>{head}</tr></thead><tbody>{''.join(metric_rows)}</tbody></table></div>"
+        "</article>"
+    )
+
+
+def _detail_table(rows: list[dict], extra_columns: tuple[str, ...] = ()) -> str:
+    """Per-golden detail: one card per golden (input and output shown once,
+    then its metrics), with a CSS-only toggle to hide fully passing goldens."""
+    if not rows:
+        return "<p><em>No rows in this report.</em></p>"
+    groups = _golden_groups(rows, extra_columns)
+    cards = [_golden_card(key, group, extra_columns) for key, group in groups]
+    n_failing = sum(1 for _, group in groups if not all(r.get("success") is True for r in group))
+    return (
+        '<input type="checkbox" id="only-failing" class="filter-toggle">'
+        f'<label for="only-failing" class="filter-label">Show only failing goldens ({n_failing})</label>'
+        f'<div class="golden-list">{"".join(cards)}</div>'
     )
 
 
@@ -627,6 +670,8 @@ def render_html_report(
     run_pass_rate = overall_pass_rate(rows)
     n_errors = sum(1 for r in rows if _is_error(r))
     n_goldens = len({r.get("golden_id") for r in rows if r.get("golden_id")}) or len(rows)
+    failed_ids = {r.get("golden_id") for r in rows if r.get("success") is not True}
+    n_goldens_passed = len({r.get("golden_id") for r in rows} - failed_ids)
     if golden_usage is None:
         golden_usage = ledger_goldens_for(csv_path)
     golden_ids = {r.get("golden_id") for r in rows}
@@ -643,7 +688,7 @@ def render_html_report(
 
     kpi_html = (
         '<div class="kpi-grid">'
-        + _kpi_card("Goldens", "blue", str(n_goldens), "Tested this run")
+        + _kpi_card("Goldens", "blue", str(n_goldens), f"{n_goldens_passed} passed every metric")
         + _kpi_card(
             "Pass rate", "cyan",
             _fmt_pct(run_pass_rate),

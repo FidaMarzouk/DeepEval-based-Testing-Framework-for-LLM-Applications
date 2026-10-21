@@ -1,6 +1,6 @@
 [project]
 name = "elyaeval"
-version = "0.1.1"
+version = "0.1.2"
 description = "Starter kit for DeepEval-based CI/CD testing: standard dataset, metric presets, and a pytest-file generator."
 readme = "README.md"
 requires-python = ">=3.10"

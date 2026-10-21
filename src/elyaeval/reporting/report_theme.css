@@ -276,6 +276,7 @@ tbody tr:hover { background: var(--ely-cyan-tint); }
 
 .badge {
   display: inline-flex;
+  white-space: nowrap;
   align-items: center;
   gap: 0.3rem;
   padding: 0.15rem 0.6rem;
@@ -310,4 +311,121 @@ tbody tr:hover { background: var(--ely-cyan-tint); }
   border-top: 1px solid var(--border);
   font-size: 0.75rem;
   color: var(--muted);
+}
+/* ---- per-golden cards ------------------------------------------------
+   One card per golden: its input/output shown once, then a compact table
+   of its metrics (instead of repeating the texts on every metric row). */
+
+.filter-toggle { position: absolute; opacity: 0; pointer-events: none; }
+
+.filter-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.filter-label::before {
+  content: "";
+  width: 0.8rem;
+  height: 0.8rem;
+  border: 1.5px solid var(--muted);
+  border-radius: 4px;
+  flex: none;
+}
+
+.filter-toggle:checked + .filter-label {
+  border-color: var(--ely-pink);
+  color: var(--ely-pink);
+  background: var(--ely-pink-tint);
+}
+
+.filter-toggle:checked + .filter-label::before {
+  background: var(--ely-pink);
+  border-color: var(--ely-pink);
+}
+
+.filter-toggle:focus-visible + .filter-label { outline: 2px solid var(--ely-blue); outline-offset: 2px; }
+
+.filter-toggle:checked ~ .golden-list .golden-card.all-pass { display: none; }
+
+.golden-list { display: grid; gap: 1.25rem; }
+
+.golden-card {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--fail);
+  border-radius: 14px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.golden-card.all-pass { border-left-color: var(--pass); }
+
+.golden-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+.golden-title { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+
+.golden-id {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 700;
+  font-size: 0.92rem;
+  margin-right: 0.25rem;
+}
+
+.qa-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.qa-block { background: #fff; padding: 0.85rem 1.1rem; }
+
+.qa-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.qa-block:first-child .qa-label { color: var(--ely-blue); }
+.qa-block:last-child .qa-label { color: #0C7C9B; }
+
+.qa-text { font-size: 0.88rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.qa-text details summary { cursor: pointer; list-style: none; }
+.qa-text details[open] summary { display: none; }
+.qa-text .more { color: var(--ely-blue); font-weight: 600; font-size: 0.78rem; }
+
+.golden-card .table-wrap { border: none; border-radius: 0; }
+
+.metric-table th { position: static; }
+.metric-table td { border-right: none; }
+.metric-table .metric-name { font-weight: 600; white-space: nowrap; }
+.metric-table .score-cell { min-width: 9rem; }
+.metric-table .judge, .metric-table .num { white-space: nowrap; }
+.metric-table .why { min-width: 18rem; white-space: pre-line; }
+
+@media print {
+  .filter-toggle, .filter-label { display: none; }
+  .golden-card { break-inside: avoid; }
 }

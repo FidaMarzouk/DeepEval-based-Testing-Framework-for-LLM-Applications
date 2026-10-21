@@ -60,7 +60,7 @@ the `test_elyaeval_*.py` files a *mission* gets from `elyaeval init`. Run them w
 
 ```bash
 # in a mission repo: pinned to a release tag of this repo
-pip install "elyaeval[ollama] @ git+https://github.com/<owner>/<repo>.git@v0.1.1"
+pip install "elyaeval[ollama] @ git+https://github.com/<owner>/<repo>.git@v0.1.2"
 
 # framework development, from a checkout of this repo
 pip install -e ".[dev,ollama]"
@@ -115,16 +115,7 @@ Check what a config resolves to (the key is never printed) and that the judge an
 ```bash
 elyaeval judge          # resolved provider/model/base URL/timeout
 elyaeval judge --ping   # + one tiny schema-constrained call
-```
-
-**Local models:** DeepEval caps each evaluation at 180 s, which is too short for a metric on an 8B
-model on a laptop GPU; `ollama`/`openai_compatible` therefore default to 900 s (`timeout_seconds`
-to change it). elyaeval evaluates one metric per DeepEval call, so the timeout applies per metric.
-Small local judges can also get stuck repeating themselves inside the JSON they're asked to return
-and generate for many minutes; local providers therefore cap every judge reply at 2048 tokens
-(`max_output_tokens`; 0 disables it). A runaway reply then fails in seconds, as an **error** row
-in the report, instead of eating the whole timeout. Prefer `provider = "ollama"` over the `/v1`
-endpoint: the native API constrains the judge's output to each metric's JSON schema.
+```.
 
 ### Thresholds
 
@@ -419,8 +410,8 @@ Dockerfile ship inside this package, version-matched:
 
 ```bash
 # once per cluster
-docker build -f src/elyaeval/recipes/docker/runner.Dockerfile -t elyaeval-runner:0.1.1 .
-kind load docker-image elyaeval-runner:0.1.1 --name elyaeval     # or push to a registry
+docker build -f src/elyaeval/recipes/docker/runner.Dockerfile -t elyaeval-runner:0.1.2 .
+kind load docker-image elyaeval-runner:0.1.2 --name elyaeval     # or push to a registry
 elyaeval ci apply -n elyaeval
 
 # once per mission repo

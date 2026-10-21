@@ -38,30 +38,30 @@ Every Python step runs in `elyaeval-runner:<version>`: elyaeval + DeepEval + the
 Anthropic SDKs, preinstalled. Build it from the root of an elyaeval checkout:
 
 ```bash
-docker build -f src/elyaeval/recipes/docker/runner.Dockerfile -t elyaeval-runner:0.1.1 .
+docker build -f src/elyaeval/recipes/docker/runner.Dockerfile -t elyaeval-runner:0.1.2 .
 ```
 
 Then make it available to the cluster, either:
 
-- **kind** (local): `kind load docker-image elyaeval-runner:0.1.1 --name elyaeval`
+- **kind** (local): `kind load docker-image elyaeval-runner:0.1.2 --name elyaeval`
 - **a registry** (shared clusters), e.g. GitHub Container Registry:
   ```bash
-  docker tag elyaeval-runner:0.1.1 ghcr.io/<you>/elyaeval-runner:0.1.1
-  docker push ghcr.io/<you>/elyaeval-runner:0.1.1
+  docker tag elyaeval-runner:0.1.2 ghcr.io/<you>/elyaeval-runner:0.1.2
+  docker push ghcr.io/<you>/elyaeval-runner:0.1.2
   ```
   and use that full name everywhere below (`--runner-image`, or `ELYAEVAL_RUNNER_IMAGE`).
 
 Other judge SDKs: `--build-arg ELYAEVAL_EXTRAS="ollama,anthropic,gemini"`. Without an elyaeval
 checkout, `elyaeval ci dockerfile > runner.Dockerfile` plus
-`--build-arg ELYAEVAL_SPEC="elyaeval[ollama,anthropic] @ git+https://github.com/<owner>/<repo>.git@v0.1.1"`
+`--build-arg ELYAEVAL_SPEC="elyaeval[ollama,anthropic] @ git+https://github.com/<owner>/<repo>.git@v0.1.2"`
 builds the same image from a git tag.
 
 ### 1.3 The Pipeline and Tasks
 
 ```bash
-pip install "elyaeval @ git+https://github.com/<owner>/<repo>.git@v0.1.1"
+pip install "elyaeval @ git+https://github.com/<owner>/<repo>.git@v0.1.2"
 elyaeval ci apply -n elyaeval                      # runner image defaults to elyaeval-runner:<this version>
-elyaeval ci apply -n elyaeval --runner-image ghcr.io/<you>/elyaeval-runner:0.1.1
+elyaeval ci apply -n elyaeval --runner-image ghcr.io/<you>/elyaeval-runner:0.1.2
 elyaeval ci render --output-dir ci/                # or just write the YAML, to review / kubectl apply yourself
 ```
 
@@ -102,7 +102,7 @@ Different missions with different judge keys: create one Secret per mission and 
 In the mission's repo (public GitHub repos clone without credentials):
 
 ```bash
-pip install "elyaeval[ollama] @ git+https://github.com/<owner>/<repo>.git@v0.1.1"
+pip install "elyaeval[ollama] @ git+https://github.com/<owner>/<repo>.git@v0.1.2"
 elyaeval init --task-type rag_qa                    # the test file; fill in run_app() (calls APP_URL)
 # + goldens file, elyaeval.toml (judge, thresholds, budget, regression gate)
 elyaeval init-ci --blob-container <mission-name> --ci-stage per_commit --budget-seconds 1800
